@@ -198,79 +198,6 @@ fail1:
                      (_Size),                                                           \
                      (_Optional))
 
-static FORCEINLINE NTSTATUS
-__ForgetInterface(
-    IN  const WCHAR     *ProviderName,
-    IN  const CHAR      *InterfaceName,
-    IN  PINTERFACE      Interface,
-    IN  ULONG           Size
-    )
-{
-    UNICODE_STRING      Unicode;
-    HANDLE              SubscriberKey;
-    NTSTATUS            status;
-
-    ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
-
-    RtlZeroMemory(Interface, Size);
-
-    Unicode.MaximumLength = (USHORT)((wcslen(SERVICES_KEY) +
-                                      1 +
-                                      wcslen(ProviderName) +
-                                      1 +
-                                      wcslen(L"\\Interfaces\\XENNET") +
-                                      1) * sizeof (WCHAR));
-
-    Unicode.Buffer = ExAllocatePoolWithTag(NonPagedPool,
-                                           Unicode.MaximumLength,
-                                           'TEN');
-
-    status = STATUS_NO_MEMORY;
-    if (Unicode.Buffer == NULL)
-        goto fail1;
-
-    status = RtlStringCbPrintfW(Unicode.Buffer,
-                                Unicode.MaximumLength,
-                                SERVICES_KEY L"\\%ws\\Interfaces\\XENNET",
-                                ProviderName);
-    ASSERT(NT_SUCCESS(status));
-
-    Unicode.Length = (USHORT)(wcslen(Unicode.Buffer) * sizeof (WCHAR));
-
-    status = RegistryOpenKey(NULL, &Unicode, KEY_READ, &SubscriberKey);
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
-    (VOID) RegistryDeleteValue(SubscriberKey,
-                               (PCHAR)InterfaceName);
-
-    RegistryCloseKey(SubscriberKey);
-
-    ExFreePool(Unicode.Buffer);
-
-    return STATUS_SUCCESS;
-
-fail2:
-    Error("fail2\n");
-
-    ExFreePool(Unicode.Buffer);
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-
-    return status;
-}
-
-#define FORGET_INTERFACE(                                               \
-    _ProviderName,                                                      \
-    _InterfaceName,                                                     \
-    _Interface,                                                         \
-    _Size)                                                              \
-    __ForgetInterface(L ## #_ProviderName,                              \
-                      #_InterfaceName,                                  \
-                      (_Interface),                                     \
-                      (_Size))
-
 NDIS_STATUS 
 MiniportInitialize (
     IN  NDIS_HANDLE                        MiniportAdapterHandle,
@@ -329,10 +256,8 @@ MiniportInitialize (
 fail3:
     Error("fail3\n");
 
-    FORGET_INTERFACE(XENVIF,
-                     VIF,
-                     (PINTERFACE)&Adapter->VifInterface,
-                     sizeof (Adapter->VifInterface));
+    RtlZeroMemory(&Adapter->VifInterface,
+                  sizeof (XENVIF_VIF_INTERFACE));
 
 fail2:
     Error("fail2\n");
@@ -365,10 +290,8 @@ MiniportHalt (
 
     AdapterCleanup(Adapter);
 
-    FORGET_INTERFACE(XENVIF,
-                     VIF,
-                     (PINTERFACE)&Adapter->VifInterface,
-                     sizeof (Adapter->VifInterface));
+    RtlZeroMemory(&Adapter->VifInterface,
+                  sizeof (XENVIF_VIF_INTERFACE));
 
     ExFreePool(Adapter);
 }
