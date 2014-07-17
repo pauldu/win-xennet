@@ -613,7 +613,11 @@ GetNetLuid(
     for (Index = 0; Index < Table->NumEntries; Index++) {
         Row = &Table->Table[Index];
 
-        if (!(Row->InterfaceAndOperStatusFlags.HardwareInterface))
+        if (Row->OperStatus != IfOperStatusUp)
+            continue;
+
+        if (!(Row->InterfaceAndOperStatusFlags.HardwareInterface) ||
+            !(Row->InterfaceAndOperStatusFlags.ConnectorPresent))
             continue;
 
         if (Row->PhysicalAddressLength != sizeof (ETHERNET_ADDRESS))
@@ -1003,6 +1007,7 @@ fail1:
 
 typedef struct _DEVICE_WALK {
     PTCHAR  Driver;
+    PTCHAR  BusID;
     PTCHAR  DeviceID;
     PTCHAR  InstanceID;
 } DEVICE_WALK, *PDEVICE_WALK;
@@ -1140,52 +1145,44 @@ fail1:
 }
 
 static BOOLEAN
-OpenEnumKey(
-    IN  const TCHAR *Bus,
-    OUT PHKEY       Key
+IsBusID(
+    IN  HKEY        Key,
+    IN  PTCHAR      SubKeyName,
+    IN  PVOID       Argument
     )
-{   
-    TCHAR           KeyName[MAX_PATH];
-    HRESULT         Result;
+{
+    PDEVICE_WALK    Walk = Argument;
     HRESULT         Error;
+    HKEY            SubKey;
 
-    Result = StringCbPrintf(KeyName,
-                            MAX_PATH,
-                            "%s\\%s",
-                            ENUM_KEY,
-                            Bus);
-    if (!SUCCEEDED(Result)) {
-        SetLastError(ERROR_BUFFER_OVERFLOW);
+    Log("====> (%s)", SubKeyName);
+
+    Error = RegOpenKeyEx(Key,
+                         SubKeyName,
+                         0,
+                         KEY_READ,
+                         &SubKey);
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
         goto fail1;
     }
 
-    Log("%s", KeyName);
-
-    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
-                         KeyName,
-                         0,
-                         KEY_READ,
-                         Key);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
+    if (!WalkSubKeys(SubKey,
+                     IsDeviceID,
+                     Walk,
+                     &Walk->DeviceID)) {
+        SetLastError(ERROR_FILE_NOT_FOUND);
         goto fail2;
     }
+
+    Log("<====");
 
     return TRUE;
 
 fail2:
-    Log("fail2");
+    RegCloseKey(SubKey);
 
 fail1:
-    Error = GetLastError();
-
-    {
-        PTCHAR  Message;
-        Message = __GetErrorMessage(Error);
-        Log("fail1 (%s)", Message);
-        LocalFree(Message);
-    }
-
     return FALSE;
 }
 
@@ -1197,8 +1194,8 @@ FindAliasDeviceInstanceID(
     )
 {
     DEVICE_WALK             Walk;
-    BOOLEAN                 Success;
-    HKEY                    PciKey;
+    HKEY                    EnumKey;
+    DWORD                   DeviceIDLength;
     PTCHAR                  Prefix;
     DWORD                   InstanceIDLength;
     DWORD                   Index;
@@ -1215,19 +1212,39 @@ FindAliasDeviceInstanceID(
 
     Walk.Driver = SoftwareKeyName;
 
-    Success = OpenEnumKey("PCI", &PciKey);
-    if (!Success)
+    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
+                         ENUM_KEY,
+                         0,
+                         KEY_READ,
+                         &EnumKey);
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
         goto fail1;
+    }
 
-    if (!WalkSubKeys(PciKey,
-                     IsDeviceID,
+    if (!WalkSubKeys(EnumKey,
+                     IsBusID,
                      &Walk,
-                     &Walk.DeviceID)) {
+                     &Walk.BusID)) {
         SetLastError(ERROR_FILE_NOT_FOUND);
         goto fail2;
     }
 
-    *DeviceID = Walk.DeviceID;
+    DeviceIDLength = (ULONG)((strlen(Walk.BusID) +
+                              1 +
+                              strlen(Walk.DeviceID) +
+                              1) * sizeof (TCHAR));
+
+    *DeviceID = calloc(1, DeviceIDLength);
+    if (*DeviceID == NULL)
+        goto fail3;
+
+    Result = StringCbPrintf(*DeviceID,
+                            DeviceIDLength,
+                            "%s\\%s",
+                            Walk.BusID,
+                            Walk.DeviceID);
+    assert(SUCCEEDED(Result));
 
     Prefix = Walk.InstanceID;
 
@@ -1247,19 +1264,21 @@ FindAliasDeviceInstanceID(
 
     *InstanceID = calloc(1, InstanceIDLength);
     if (*InstanceID == NULL)
-        goto fail3;
+        goto fail4;
 
     Result = StringCbPrintf(*InstanceID,
                             InstanceIDLength,
                             "%s",
                             Walk.InstanceID);
     if (!SUCCEEDED(Result))
-        goto fail4;
+        goto fail5;
     
     if (Prefix != NULL)
         Walk.InstanceID = Prefix;
 
     free(Walk.InstanceID);
+    free(Walk.DeviceID);
+    free(Walk.BusID);
 
     for (Index = 0; Index < strlen(*DeviceID); Index++)
         (*DeviceID)[Index] = (CHAR)toupper((*DeviceID)[Index]);
@@ -1267,7 +1286,7 @@ FindAliasDeviceInstanceID(
     for (Index = 0; Index < strlen(*InstanceID); Index++)
         (*InstanceID)[Index] = (CHAR)toupper((*InstanceID)[Index]);
 
-    RegCloseKey(PciKey);
+    RegCloseKey(EnumKey);
 
 done:
     Log("DeviceID = %s", (*DeviceID != NULL) ? *DeviceID : "NOT SET");
@@ -1277,27 +1296,32 @@ done:
 
     return TRUE;
 
-fail4:
-    Log("fail4");
+fail5:
+    Log("fail5");
 
     free(*InstanceID);
     *InstanceID = NULL;
 
-fail3:
-    Log("fail3");
+fail4:
+    Log("fail4");
 
     if (Prefix != NULL)
         Walk.InstanceID = Prefix;
 
+    free(*DeviceID);
     *DeviceID = NULL;
 
-    free(Walk.DeviceID);
+fail3:
+    Log("fail3");
+
     free(Walk.InstanceID);
+    free(Walk.DeviceID);
+    free(Walk.BusID);
 
 fail2:
     Log("fail2");
 
-    RegCloseKey(PciKey);
+    RegCloseKey(EnumKey);
     
 fail1:
     Error = GetLastError();
@@ -2473,66 +2497,6 @@ fail1:
     }
 
     return FALSE;
-}
-
-static HKEY 
-CreateFormattedKey(
-    IN LPCTSTR Format, 
-    IN ...
-    )
-{
-
-    HRESULT     Result;
-    TCHAR       KeyName[MAX_PATH];
-    HKEY        Key;
-    HRESULT     Error;
-    va_list     Args;
-    
-    va_start(Args, Format);
-
-    Result = StringCbVPrintf(KeyName,
-                            MAX_PATH,
-                            Format,
-                            Args);
-    if (!SUCCEEDED(Result)) {
-        SetLastError(ERROR_BUFFER_OVERFLOW);
-        goto fail1;
-    }
-
-    Error = RegCreateKeyEx(HKEY_LOCAL_MACHINE,
-                           KeyName,
-                           0,
-                           NULL,
-                           REG_OPTION_NON_VOLATILE,
-                           KEY_ALL_ACCESS,
-                           NULL,
-                           &Key,
-                           NULL);
-    if (Error != ERROR_SUCCESS) {
-        Log("Unable to find key %s",KeyName);
-        SetLastError(Error);
-        goto fail2;
-    }
-
-    va_end(Format);
-   
-    return Key;
-
-fail2:
-    Log("fail2");
-
-fail1:
-    Error = GetLastError();
-
-    {
-        PTCHAR  Message;
-        Message = __GetErrorMessage(Error);
-        Log("fail1 (%s)", Message);
-        LocalFree(Message);
-    }
-
-    va_end(Format);
-    return NULL;
 }
 
 static BOOLEAN
