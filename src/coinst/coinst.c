@@ -63,9 +63,6 @@ __user_code;
 #define ADDRESSES_KEY   \
         SERVICE_KEY(XENVIF) ## "\\Addresses"
 
-#define ALIASES_KEY \
-        SERVICE_KEY(XENVIF) ## "\\Aliases"
-
 #define UNPLUG_KEY  \
         SERVICE_KEY(XENFILT) ## "\\Unplug"
 
@@ -613,11 +610,11 @@ GetNetLuid(
     for (Index = 0; Index < Table->NumEntries; Index++) {
         Row = &Table->Table[Index];
 
-        if (Row->OperStatus != IfOperStatusUp)
-            continue;
-
         if (!(Row->InterfaceAndOperStatusFlags.HardwareInterface) ||
             !(Row->InterfaceAndOperStatusFlags.ConnectorPresent))
+            continue;
+
+        if (Row->OperStatus != IfOperStatusUp)
             continue;
 
         if (Row->PhysicalAddressLength != sizeof (ETHERNET_ADDRESS))
@@ -917,749 +914,6 @@ fail2:
     Log("fail2");
 
     free(NetLuid);
-
-fail1:
-    Error = GetLastError();
-
-    {
-        PTCHAR  Message;
-        Message = __GetErrorMessage(Error);
-        Log("fail1 (%s)", Message);
-        LocalFree(Message);
-    }
-
-    return FALSE;
-}
-
-static BOOLEAN
-WalkSubKeys(
-    IN  HKEY    Key,
-    IN  BOOLEAN (*Match)(HKEY, PTCHAR, PVOID),
-    IN  PVOID   Argument,
-    OUT PTCHAR  *SubKeyName
-    )
-{
-    HRESULT     Error;
-    DWORD       SubKeys;
-    DWORD       MaxSubKeyLength;
-    DWORD       SubKeyLength;
-    DWORD       Index;
-
-    Error = RegQueryInfoKey(Key,
-                            NULL,
-                            NULL,
-                            NULL,
-                            &SubKeys,
-                            &MaxSubKeyLength,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail1;
-    }
-
-    SubKeyLength = MaxSubKeyLength + sizeof (TCHAR);
-
-    *SubKeyName = malloc(SubKeyLength);
-    if (*SubKeyName == NULL)
-        goto fail2;
-
-    for (Index = 0; Index < SubKeys; Index++) {
-        SubKeyLength = MaxSubKeyLength + sizeof (TCHAR);
-        memset(*SubKeyName, 0, SubKeyLength);
-
-        Error = RegEnumKeyEx(Key,
-                             Index,
-                             (LPTSTR)*SubKeyName,
-                             &SubKeyLength,
-                             NULL,
-                             NULL,
-                             NULL,
-                             NULL);
-        if (Error != ERROR_SUCCESS) {
-            SetLastError(Error);
-            goto fail3;
-        }
-
-        if (Match(Key, *SubKeyName, Argument))
-            goto done;
-    }
-
-    SetLastError(ERROR_FILE_NOT_FOUND);
-    goto fail4;
-        
-done:
-    return TRUE;
-
-fail4:
-fail3:
-    free(*SubKeyName);
-    *SubKeyName = NULL;
-
-fail2:
-fail1:
-    return FALSE;
-}
-
-typedef struct _DEVICE_WALK {
-    PTCHAR  Driver;
-    PTCHAR  BusID;
-    PTCHAR  DeviceID;
-    PTCHAR  InstanceID;
-} DEVICE_WALK, *PDEVICE_WALK;
-
-static BOOLEAN
-IsInstanceID(
-    IN  HKEY        Key,
-    IN  PTCHAR      SubKeyName,
-    IN  PVOID       Argument
-    )
-{
-    PDEVICE_WALK    Walk = Argument;
-    HKEY            SubKey;
-    HRESULT         Error;
-    DWORD           MaxValueLength;
-    DWORD           DriverLength;
-    PTCHAR          Driver;
-    DWORD           Type;
-
-    Log("====> (%s)", SubKeyName);
-
-    Error = RegOpenKeyEx(Key,
-                         SubKeyName,
-                         0,
-                         KEY_READ,
-                         &SubKey);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail1;
-    }
-
-    Error = RegQueryInfoKey(SubKey,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            &MaxValueLength,
-                            NULL,
-                            NULL);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail2;
-    }
-
-    DriverLength = MaxValueLength + sizeof (TCHAR);
-
-    Driver = calloc(1, DriverLength);
-    if (Driver == NULL)
-        goto fail3;
-
-    Error = RegQueryValueEx(SubKey,
-                            "Driver",
-                            NULL,
-                            &Type,
-                            (LPBYTE)Driver,
-                            &DriverLength);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail4;
-    }
-
-    if (Type != REG_SZ) {
-        SetLastError(ERROR_BAD_FORMAT);
-        goto fail5;
-    }
-
-    if (_stricmp(Driver, Walk->Driver) != 0) {
-        SetLastError(ERROR_FILE_NOT_FOUND);
-        goto fail6;
-    }
-
-    free(Driver);
-
-    Log("<====");
-
-    return TRUE;
-
-fail6:
-fail5:
-fail4:
-    free(Driver);
-
-fail3:
-fail2:
-    RegCloseKey(SubKey);
-
-fail1:
-    return FALSE;
-}
-
-static BOOLEAN
-IsDeviceID(
-    IN  HKEY        Key,
-    IN  PTCHAR      SubKeyName,
-    IN  PVOID       Argument
-    )
-{
-    PDEVICE_WALK    Walk = Argument;
-    HRESULT         Error;
-    HKEY            SubKey;
-
-    Log("====> (%s)", SubKeyName);
-
-    Error = RegOpenKeyEx(Key,
-                         SubKeyName,
-                         0,
-                         KEY_READ,
-                         &SubKey);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail1;
-    }
-
-    if (!WalkSubKeys(SubKey,
-                     IsInstanceID,
-                     Walk,
-                     &Walk->InstanceID)) {
-        SetLastError(ERROR_FILE_NOT_FOUND);
-        goto fail2;
-    }
-
-    Log("<====");
-
-    return TRUE;
-
-fail2:
-    RegCloseKey(SubKey);
-
-fail1:
-    return FALSE;
-}
-
-static BOOLEAN
-IsBusID(
-    IN  HKEY        Key,
-    IN  PTCHAR      SubKeyName,
-    IN  PVOID       Argument
-    )
-{
-    PDEVICE_WALK    Walk = Argument;
-    HRESULT         Error;
-    HKEY            SubKey;
-
-    Log("====> (%s)", SubKeyName);  
-
-    if (_stricmp(SubKeyName, "PCI") != 0)
-        goto done;
-
-    Error = RegOpenKeyEx(Key,
-                         SubKeyName,
-                         0,
-                         KEY_READ,
-                         &SubKey);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail1;
-    }
-
-    if (!WalkSubKeys(SubKey,
-                     IsDeviceID,
-                     Walk,
-                     &Walk->DeviceID)) {
-        SetLastError(ERROR_FILE_NOT_FOUND);
-        goto fail2;
-    }
-
-done:
-    Log("<====");
-
-    return TRUE;
-
-fail2:
-    RegCloseKey(SubKey);
-
-fail1:
-    return FALSE;
-}
-
-static BOOLEAN
-FindAliasDeviceInstanceID(
-    IN  PTCHAR              SoftwareKeyName,
-    OUT PTCHAR              *DeviceID,
-    OUT PTCHAR              *InstanceID
-    )
-{
-    DEVICE_WALK             Walk;
-    HKEY                    EnumKey;
-    DWORD                   DeviceIDLength;
-    PTCHAR                  Prefix;
-    DWORD                   InstanceIDLength;
-    DWORD                   Index;
-    HRESULT                 Error;
-    HRESULT                 Result;
-
-    Log("====>");
-
-    *DeviceID = NULL;
-    *InstanceID = NULL;
-
-    if (SoftwareKeyName == NULL)
-        goto done;
-
-    Walk.Driver = SoftwareKeyName;
-
-    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
-                         ENUM_KEY,
-                         0,
-                         KEY_READ,
-                         &EnumKey);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail1;
-    }
-
-    if (!WalkSubKeys(EnumKey,
-                     IsBusID,
-                     &Walk,
-                     &Walk.BusID)) {
-        SetLastError(ERROR_FILE_NOT_FOUND);
-        goto fail2;
-    }
-
-    DeviceIDLength = (ULONG)((strlen(Walk.BusID) +
-                              1 +
-                              strlen(Walk.DeviceID) +
-                              1) * sizeof (TCHAR));
-
-    *DeviceID = calloc(1, DeviceIDLength);
-    if (*DeviceID == NULL)
-        goto fail3;
-
-    Result = StringCbPrintf(*DeviceID,
-                            DeviceIDLength,
-                            "%s\\%s",
-                            Walk.BusID,
-                            Walk.DeviceID);
-    assert(SUCCEEDED(Result));
-
-    Prefix = Walk.InstanceID;
-
-    Walk.InstanceID = strrchr(Prefix, '&');
-    if (Walk.InstanceID != NULL) {
-        *Walk.InstanceID++ = '\0';
-    } else {
-        Walk.InstanceID = Prefix;
-        Prefix = NULL;
-    }
-
-    if (Prefix != NULL)
-        Log("Parent Prefix = %s", Prefix);
-
-    InstanceIDLength = (ULONG)((strlen(Walk.InstanceID) +
-                                1) * sizeof (TCHAR));
-
-    *InstanceID = calloc(1, InstanceIDLength);
-    if (*InstanceID == NULL)
-        goto fail4;
-
-    Result = StringCbPrintf(*InstanceID,
-                            InstanceIDLength,
-                            "%s",
-                            Walk.InstanceID);
-    if (!SUCCEEDED(Result))
-        goto fail5;
-    
-    if (Prefix != NULL)
-        Walk.InstanceID = Prefix;
-
-    free(Walk.InstanceID);
-    free(Walk.DeviceID);
-    free(Walk.BusID);
-
-    for (Index = 0; Index < strlen(*DeviceID); Index++)
-        (*DeviceID)[Index] = (CHAR)toupper((*DeviceID)[Index]);
-
-    for (Index = 0; Index < strlen(*InstanceID); Index++)
-        (*InstanceID)[Index] = (CHAR)toupper((*InstanceID)[Index]);
-
-    RegCloseKey(EnumKey);
-
-done:
-    Log("DeviceID = %s", (*DeviceID != NULL) ? *DeviceID : "NOT SET");
-    Log("InstanceID = %s", (*InstanceID != NULL) ? *InstanceID : "NOT SET");
-
-    Log("<====");
-
-    return TRUE;
-
-fail5:
-    Log("fail5");
-
-    free(*InstanceID);
-    *InstanceID = NULL;
-
-fail4:
-    Log("fail4");
-
-    if (Prefix != NULL)
-        Walk.InstanceID = Prefix;
-
-    free(*DeviceID);
-    *DeviceID = NULL;
-
-fail3:
-    Log("fail3");
-
-    free(Walk.InstanceID);
-    free(Walk.DeviceID);
-    free(Walk.BusID);
-
-fail2:
-    Log("fail2");
-
-    RegCloseKey(EnumKey);
-    
-fail1:
-    Error = GetLastError();
-
-    {
-        PTCHAR  Message;
-        Message = __GetErrorMessage(Error);
-        Log("fail1 (%s)", Message);
-        LocalFree(Message);
-    }
-
-    return FALSE;
-}
-
-static BOOLEAN
-SetAliasDeviceInstanceID(
-    IN  HDEVINFO            DeviceInfoSet,
-    IN  PSP_DEVINFO_DATA    DeviceInfoData,
-    IN  PTCHAR              DeviceID,
-    IN  PTCHAR              InstanceID
-    )
-{
-    PTCHAR                  Location;
-    HKEY                    AliasesKey;
-    DWORD                   DeviceInstanceIDLength;
-    PTCHAR                  DeviceInstanceID;
-    HRESULT                 Error;
-
-    Log("====>");
-
-    Location = GetProperty(DeviceInfoSet,
-                           DeviceInfoData,
-                           SPDRP_LOCATION_INFORMATION);
-    if (Location == NULL)
-        goto fail1;
-
-    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
-                         ALIASES_KEY,
-                         0,
-                         KEY_ALL_ACCESS,
-                         &AliasesKey);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail2;
-    }
-
-    if (DeviceID != NULL) {
-        assert(InstanceID != NULL);
-        DeviceInstanceIDLength = (DWORD)((strlen(DeviceID) +
-                                          1 + /* \\ */
-                                          strlen(InstanceID) +
-                                          1) * sizeof (TCHAR));
-    } else {
-        DeviceInstanceIDLength = (DWORD)sizeof (TCHAR);
-    }
-
-    DeviceInstanceID = calloc(1, DeviceInstanceIDLength);
-    if (DeviceInstanceID == NULL)
-        goto fail3;
-
-    if (DeviceID != NULL) {
-        HRESULT Result;
-
-        Result = StringCbPrintf(DeviceInstanceID,
-                                DeviceInstanceIDLength,
-                                "%s\\%s",
-                                DeviceID,
-                                InstanceID);
-        assert(SUCCEEDED(Result));
-    }
-
-    Error = RegSetValueEx(AliasesKey,
-                          Location,
-                          0,
-                          REG_SZ,
-                          (LPBYTE)DeviceInstanceID,
-                          DeviceInstanceIDLength);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail4;
-    }
-
-    free(DeviceInstanceID);
-
-    RegCloseKey(AliasesKey);
-
-    free(Location);
-
-    Log("<====");
-
-    return TRUE;
-
-fail4:
-    Log("fail4");
-
-    free(DeviceInstanceID);
-
-fail3:
-    Log("fail3");
-
-    RegCloseKey(AliasesKey);
-
-fail2:
-    Log("fail2");
-
-    free(Location);
-
-fail1:
-    Error = GetLastError();
-
-    {
-        PTCHAR  Message;
-        Message = __GetErrorMessage(Error);
-        Log("fail1 (%s)", Message);
-        LocalFree(Message);
-    }
-
-    return FALSE;
-}
-
-static BOOLEAN
-GetAliasDeviceInstanceID(
-    IN  HDEVINFO            DeviceInfoSet,
-    IN  PSP_DEVINFO_DATA    DeviceInfoData,
-    OUT PTCHAR              *DeviceID,
-    OUT PTCHAR              *InstanceID
-    )
-{
-    PTCHAR                  Location;
-    HKEY                    AliasesKey;
-    DWORD                   MaxValueLength;
-    DWORD                   DeviceInstanceIDLength;
-    PTCHAR                  DeviceInstanceID;
-    DWORD                   Type;
-    DWORD                   InstanceIDLength;
-    HRESULT                 Result;
-    HRESULT                 Error;
-
-    Log("====>");
-
-    Location = GetProperty(DeviceInfoSet,
-                           DeviceInfoData,
-                           SPDRP_LOCATION_INFORMATION);
-    if (Location == NULL)
-        goto fail1;
-
-    Log("Location = %s", Location);
-
-    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
-                         ALIASES_KEY,
-                         0,
-                         KEY_READ,
-                         &AliasesKey);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail2;
-    }
-
-    Error = RegQueryInfoKey(AliasesKey,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            &MaxValueLength,
-                            NULL,
-                            NULL);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail3;
-    }
-
-    DeviceInstanceIDLength = MaxValueLength + sizeof (TCHAR);
-
-    DeviceInstanceID = calloc(1, DeviceInstanceIDLength);
-    if (DeviceInstanceID == NULL)
-        goto fail4;
-
-    *DeviceID = NULL;
-    *InstanceID = NULL;
-
-    Error = RegQueryValueEx(AliasesKey,
-                            Location,
-                            NULL,
-                            &Type,
-                            (LPBYTE)DeviceInstanceID,
-                            &DeviceInstanceIDLength);
-    if (Error != ERROR_SUCCESS) {
-        if (Error == ERROR_FILE_NOT_FOUND) {
-            free(DeviceInstanceID);
-            goto done;
-        }
-
-        SetLastError(Error);
-        goto fail5;
-    }
-
-    if (Type != REG_SZ) {
-        SetLastError(ERROR_BAD_FORMAT);
-        goto fail6;
-    }
-
-    if (strlen(DeviceInstanceID) == 0) {
-        free(DeviceInstanceID);
-        goto done;
-    }
-
-    *DeviceID = DeviceInstanceID;
-
-    DeviceInstanceID = strrchr(*DeviceID, '\\');
-    assert(DeviceInstanceID != NULL);
-
-    *DeviceInstanceID++ = '\0';
-
-    InstanceIDLength = (ULONG)((strlen(DeviceInstanceID) +
-                                1) * sizeof (TCHAR));
-
-    *InstanceID = calloc(1, InstanceIDLength);
-    if (*InstanceID == NULL)
-        goto fail7;
-
-    Result = StringCbPrintf(*InstanceID,
-                            InstanceIDLength,
-                            "%s",
-                            DeviceInstanceID);
-    assert(SUCCEEDED(Result));
-    
-done:
-    RegCloseKey(AliasesKey);
-
-    free(Location);
-
-    Log("DeviceID = %s", (*DeviceID != NULL) ? *DeviceID : "NOT SET");
-    Log("InstanceID = %s", (*InstanceID != NULL) ? *InstanceID : "NOT SET");
-
-    Log("<====");
-
-    return TRUE;
-
-fail7:
-    Log("fail7");
-
-    DeviceInstanceID = *DeviceID;
-    *DeviceID = NULL;
-
-fail6:
-    Log("fail6");
-
-fail5:
-    Log("fail5");
-
-    free(DeviceInstanceID);
-
-fail4:
-    Log("fail4");
-
-fail3:
-    Log("fail3");
-
-    RegCloseKey(AliasesKey);
-
-fail2:
-    Log("fail2");
-
-    free(Location);
-
-fail1:
-    Error = GetLastError();
-
-    {
-        PTCHAR  Message;
-        Message = __GetErrorMessage(Error);
-        Log("fail1 (%s)", Message);
-        LocalFree(Message);
-    }
-
-    return FALSE;
-}
-
-static BOOLEAN
-ClearAliasDeviceInstanceID(
-    IN  HDEVINFO            DeviceInfoSet,
-    IN  PSP_DEVINFO_DATA    DeviceInfoData
-    )
-{
-    PTCHAR                  Location;
-    HKEY                    AliasesKey;
-    HRESULT                 Error;
-
-    Log("====>");
-
-    Location = GetProperty(DeviceInfoSet,
-                           DeviceInfoData,
-                           SPDRP_LOCATION_INFORMATION);
-    if (Location == NULL)
-        goto fail1;
-
-    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
-                         ALIASES_KEY,
-                         0,
-                         KEY_ALL_ACCESS,
-                         &AliasesKey);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail2;
-    }
-
-    Error = RegDeleteValue(AliasesKey,
-                           Location);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail3;
-    }
-
-    RegCloseKey(AliasesKey);
-
-    free(Location);
-
-    Log("<====");
-
-    return TRUE;
-
-fail3:
-    Log("fail3");
-
-    RegCloseKey(AliasesKey);
-
-fail2:
-    Log("fail2");
-
-    free(Location);
 
 fail1:
     Error = GetLastError();
@@ -2440,6 +1694,9 @@ CopySettings(
     if (DestinationName == NULL)
         goto fail2;
 
+    if (_stricmp(SourceName, DestinationName) == 0)
+        goto done;
+
     Success &= CopyParameters(PARAMETERS_KEY(NetBT) "\\Interfaces\\Tcpip_",
                               DestinationName,
                               SourceName);
@@ -2468,6 +1725,7 @@ CopySettings(
                                        DestinationName,
                                        SourceName);
 
+done:
     free(DestinationName);
     free(SourceName);
 
@@ -2529,143 +1787,18 @@ CopySettingsFromAlias(
     if (!Success)
         goto fail3;
 
-    Error = RegSetValueEx(Destination,
-                          "Alias",
-                          0,
-                          REG_SZ,
-                          (LPBYTE)Name,
-                          (DWORD)((strlen(Name) + 1) * sizeof (TCHAR)));
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail4;
-    }    
-
     RegCloseKey(Destination);
+
     RegCloseKey(Source);
 
     Log("<====");
 
     return TRUE;
 
-fail4:
-    Log("fail4");
-
 fail3:
     Log("fail3");
 
     RegCloseKey(Destination);
-
-fail2:
-    Log("fail2");
-
-    RegCloseKey(Source);
-
-fail1:
-    Error = GetLastError();
-
-    {
-        PTCHAR  Message;
-
-        Message = __GetErrorMessage(Error);
-        Log("fail1 (%s)", Message);
-        LocalFree(Message);
-    }
-
-    return FALSE;
-}
-
-static BOOLEAN
-CopySettingsToAlias(
-    IN  HDEVINFO                    DeviceInfoSet,
-    IN  PSP_DEVINFO_DATA            DeviceInfoData
-    )
-{
-    HKEY                            Source;
-    DWORD                           MaxValueLength;
-    DWORD                           NameLength;
-    PTCHAR                          Name;
-    DWORD                           Type;
-    HKEY                            Destination;
-    BOOLEAN                         Success;
-    HRESULT                         Error;
-
-    Log("====>");
-
-    Source = OpenSoftwareKey(DeviceInfoSet, DeviceInfoData);
-    if (Source == NULL)
-        goto fail1;
-
-    Error = RegQueryInfoKey(Source,
-                            NULL,
-                            NULL,
-                            NULL,    
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL,
-                            &MaxValueLength,
-                            NULL,
-                            NULL);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail2;
-    }
-
-    NameLength = MaxValueLength + sizeof (TCHAR);
-
-    Name = calloc(1, NameLength);
-    if (Name == NULL)
-        goto fail3;
-
-    Error = RegQueryValueEx(Source,
-                            "Alias",
-                            NULL,
-                            &Type,
-                            (LPBYTE)Name,
-                            &NameLength);
-    if (Error != ERROR_SUCCESS) {
-        SetLastError(Error);
-        goto fail4;
-    }
-
-    if (Type != REG_SZ) {
-        SetLastError(ERROR_BAD_FORMAT);
-        goto fail5;
-    }
-
-    Destination = OpenAliasSoftwareKey(Name);
-    if (Destination == NULL)
-        goto fail6;
-
-    Success = CopySettings(Destination, Source);
-    if (!Success)
-        goto fail7;
-
-    free(Name);
-
-    Log("<====");
-
-    return TRUE;
-
-fail7:
-    Log("fail7");
-
-    RegCloseKey(Destination);
-
-fail6:
-    Log("fail6");
-
-fail5:
-    Log("fail5");
-
-fail4:
-    Log("fail4");
-
-    free(Name);
-
-fail3:
-    Log("fail3");
 
 fail2:
     Log("fail2");
@@ -3100,12 +2233,11 @@ __DifInstallPreProcess(
     )
 {
     DWORD                           Count;
-    PTCHAR                          DeviceID;
-    PTCHAR                          InstanceID;
-    PTCHAR                          SoftwareKeyName;
     BOOLEAN                         Success;
     HRESULT                         Error;
 
+    UNREFERENCED_PARAMETER(DeviceInfoSet);
+    UNREFERENCED_PARAMETER(DeviceInfoData);
     UNREFERENCED_PARAMETER(Context);
 
     Log("====>");
@@ -3114,80 +2246,9 @@ __DifInstallPreProcess(
     if (!Success)
         goto fail1;
 
-    Success = GetAliasDeviceInstanceID(DeviceInfoSet,
-                                       DeviceInfoData,
-                                       &DeviceID,
-                                       &InstanceID);
-    if (!Success)
-        goto fail2;
-
-    if (DeviceID == NULL) {
-        ETHERNET_ADDRESS    Address;
-
-        assert(InstanceID == NULL);
-
-        Success = GetPermanentAddress(DeviceInfoSet,
-                                      DeviceInfoData,
-                                      &Address);
-        if (!Success)
-            goto fail3;
-
-        Success = FindAliasSoftwareKeyName(&Address, &SoftwareKeyName);
-        if (!Success)
-            goto fail4;
-
-        Success = FindAliasDeviceInstanceID(SoftwareKeyName,
-                                            &DeviceID,
-                                            &InstanceID);
-        if (!Success)
-            goto fail5;
-
-        Success = SetAliasDeviceInstanceID(DeviceInfoSet,
-                                           DeviceInfoData,
-                                           DeviceID,
-                                           InstanceID);
-        if (!Success)
-            goto fail6;
-    } else {
-        SoftwareKeyName = NULL;
-    }
-
-    Log("SoftwareKeyName = %s",
-        (SoftwareKeyName != NULL) ? SoftwareKeyName : "NOT SET");
-
-    Context->PrivateData = SoftwareKeyName;
-
-    if (DeviceID != NULL) {
-        free(DeviceID);
-        free(InstanceID);
-    }
-
     Log("<====");
 
     return NO_ERROR; 
-
-fail6:
-    Log("fail6");
-
-    if (DeviceID != NULL) {
-        free(DeviceID);
-        free(InstanceID);
-    }
-
-fail5:
-    Log("fail5");
-
-    if (SoftwareKeyName != NULL)
-        free(SoftwareKeyName);
-
-fail4:
-    Log("fail4");
-
-fail3:
-    Log("fail3");
-
-fail2:
-    Log("fail2");
 
 fail1:
     Error = GetLastError();
@@ -3211,45 +2272,62 @@ __DifInstallPostProcess(
     )
 {
     BOOLEAN                         Success;
+    ETHERNET_ADDRESS                Address;
     PTCHAR                          SoftwareKeyName;
     DWORD                           Count;
     HRESULT                         Error;
 
+    UNREFERENCED_PARAMETER(Context);
+
     Log("====>");
 
-    SoftwareKeyName = Context->PrivateData;
+    Success = GetPermanentAddress(DeviceInfoSet,
+                                  DeviceInfoData,
+                                  &Address);
+    if (!Success)
+        goto fail1;
 
-    Log("SoftwareKeyName = %s",
-        (SoftwareKeyName != NULL) ? SoftwareKeyName : "NOT SET");
+    Success = FindAliasSoftwareKeyName(&Address, &SoftwareKeyName);
+    if (!Success)
+        goto fail2;
 
     if (SoftwareKeyName != NULL) {
         Success = CopySettingsFromAlias(DeviceInfoSet,
                                         DeviceInfoData,
                                         SoftwareKeyName);
         if (!Success)
-            goto fail1;
+            goto fail3;
     }
 
     Success = SetFriendlyName(DeviceInfoSet,
                               DeviceInfoData);
     if (!Success)
-        goto fail2;
+        goto fail4;
 
     Success = GetServiceCount(&Count);
     if (!Success)
-        goto fail3;
+        goto fail5;
 
     if (Count == 1) {
         Success = InstallUnplugService("NICS", "XENNET");
         if (!Success)
-            goto fail4;
+            goto fail6;
 
         (VOID) RequestReboot(DeviceInfoSet, DeviceInfoData);
     }
 
+    if (SoftwareKeyName != NULL)
+        free(SoftwareKeyName);
+
     Log("<====");
 
     return NO_ERROR;
+
+fail6:
+    Log("fail6");
+
+fail5:
+    Log("fail5");
 
 fail4:
     Log("fail4");
@@ -3257,13 +2335,13 @@ fail4:
 fail3:
     Log("fail3");
 
+    if (SoftwareKeyName != NULL)
+        free(SoftwareKeyName);
+
 fail2:
     Log("fail2");
 
 fail1:
-    if (SoftwareKeyName != NULL)
-        free(SoftwareKeyName);
-
     Error = GetLastError();
 
     {
@@ -3315,8 +2393,6 @@ __DifRemovePreProcess(
     )
 {
     BOOLEAN                         Success;
-    PTCHAR                          DeviceID;
-    PTCHAR                          InstanceID;
     DWORD                           Count;
     HRESULT                         Error;
 
@@ -3328,46 +2404,14 @@ __DifRemovePreProcess(
     if (!Success)
         goto fail1;
 
-    Success = GetAliasDeviceInstanceID(DeviceInfoSet,
-                                       DeviceInfoData,
-                                       &DeviceID,
-                                       &InstanceID);
-    if (!Success)
-        goto fail2;
-
-    if (DeviceID != NULL) {
-        assert(InstanceID != NULL);
-
-        Success = CopySettingsToAlias(DeviceInfoSet,
-                                      DeviceInfoData);
-
-        free(DeviceID);
-        free(InstanceID);
-
-        if (!Success)
-            goto fail3;
-    }
-
-    Success = ClearAliasDeviceInstanceID(DeviceInfoSet,
-                                         DeviceInfoData);
-    if (!Success)
-        goto fail4;
-
-    if (Count == 1)
+    if (Count == 1) {
         (VOID) RemoveUnplugService("NICS", "XENNET");
+        (VOID) RequestReboot(DeviceInfoSet, DeviceInfoData);
+    } 
 
     Log("<====");
 
     return NO_ERROR;
-
-fail4:
-    Log("fail4");
-
-fail3:
-    Log("fail3");
-
-fail2:
-    Log("fail2");
 
 fail1:
     Error = GetLastError();
@@ -3394,6 +2438,8 @@ __DifRemovePostProcess(
     DWORD                           Count;
     HRESULT                         Error;
 
+    UNREFERENCED_PARAMETER(DeviceInfoSet);
+    UNREFERENCED_PARAMETER(DeviceInfoData);
     UNREFERENCED_PARAMETER(Context);
 
     Log("====>");
@@ -3401,9 +2447,6 @@ __DifRemovePostProcess(
     Success = GetServiceCount(&Count);
     if (!Success)
         goto fail1;
-
-    if (Count == 0)
-        (VOID) RequestReboot(DeviceInfoSet, DeviceInfoData);
 
     Log("<====");
 
