@@ -1078,7 +1078,7 @@ IsInstanceID(
         goto fail5;
     }
 
-    if (strncmp(Driver, Walk->Driver, DriverLength) != 0) {
+    if (_stricmp(Driver, Walk->Driver) != 0) {
         SetLastError(ERROR_FILE_NOT_FOUND);
         goto fail6;
     }
@@ -1155,7 +1155,10 @@ IsBusID(
     HRESULT         Error;
     HKEY            SubKey;
 
-    Log("====> (%s)", SubKeyName);
+    Log("====> (%s)", SubKeyName);  
+
+    if (_stricmp(SubKeyName, "PCI") != 0)
+        goto done;
 
     Error = RegOpenKeyEx(Key,
                          SubKeyName,
@@ -1175,6 +1178,7 @@ IsBusID(
         goto fail2;
     }
 
+done:
     Log("<====");
 
     return TRUE;
@@ -1468,6 +1472,8 @@ GetAliasDeviceInstanceID(
     if (Location == NULL)
         goto fail1;
 
+    Log("Location = %s", Location);
+
     Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
                          ALIASES_KEY,
                          0,
@@ -1508,11 +1514,9 @@ GetAliasDeviceInstanceID(
                             Location,
                             NULL,
                             &Type,
-                            (LPBYTE)*DeviceInstanceID,
+                            (LPBYTE)DeviceInstanceID,
                             &DeviceInstanceIDLength);
     if (Error != ERROR_SUCCESS) {
-        Log("not found");
-
         if (Error == ERROR_FILE_NOT_FOUND) {
             free(DeviceInstanceID);
             goto done;
@@ -2611,7 +2615,7 @@ CopySettingsToAlias(
     NameLength = MaxValueLength + sizeof (TCHAR);
 
     Name = calloc(1, NameLength);
-    if (Name != NULL)
+    if (Name == NULL)
         goto fail3;
 
     Error = RegQueryValueEx(Source,
